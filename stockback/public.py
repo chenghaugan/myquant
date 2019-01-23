@@ -239,6 +239,9 @@ class public:
         if N is not None:
             quote0['next_rtn'] = np.where(quote0['SecuCode']==quote0['SecuCode'].shift(-N),
                               quote0['rtn'].shift(-N),np.nan)
+        else:
+            quote0['next_rtn'] = np.where(quote0['SecuCode']==quote0['SecuCode'].shift(-1),
+                              quote0['rtn'].shift(-1),np.nan)
         buylist0  = pd.merge(buylist0,quote0[['TradingDay','SecuCode','next_rtn']],on=['SecuCode','TradingDay'],how='left')
         return buylist0['next_rtn'].values
     
