@@ -21,7 +21,7 @@ import pymysql
 import datetime
 from tqdm import *
 import statsmodels.api as sm
-    
+from scipy import stats   
 class public:
     '''
     数据源:聚源数据库
@@ -37,6 +37,11 @@ class public:
                            password='jydb',
                            database='jydb',
                            charset='gbk')
+        self._dbengine1 =  pymysql.connect(host='192.168.1.139',
+                           port=3306,
+                           user='jydb',
+                           password='jydb',
+                           charset='gbk')
         self.datapath  = "C:\\py_data\\datacenter\\quote.h5"   
         self.datapath2  = "C:\\py_data\\datacenter"   
     
@@ -46,38 +51,33 @@ class public:
         1. 因子中位数去极值；
         2. 因子标准
         3. 以对数总市值+行业虚拟变量为X值，以因子值为Y值，进行中性化回归处理，去残差作为新的因子值
-        quote_factor = buylist2.loc[:,:]
+        quote_factor = quote2[(quote2['TradingDay']>='20110101')&(quote2['TradingDay']<='20110301')]
         industry = 'FirstIndustryName'
         mktcap = '流通市值',若不为空，则进行市值中心化
         zs:z_core,代表标准化
-        indicator = '扣非净利润同比的环比'
+        indicator = '流通市值'
         nt:nuetralize,代表进行行业、市值中性化处理
         '''
         quote_factor = quote_factor.sort_values(['TradingDay'])
         quote_factor.index = range(len(quote_factor))
         temp = pd.get_dummies(quote_factor[industry])
         if  mktcap is not None:
-            columns = list(quote_factor[industry].drop_duplicates())+[mktcap]
+            columns = list(quote_factor[industry].drop_duplicates().dropna())+[mktcap]
             temp = pd.merge(quote_factor[['SecuCode','TradingDay',indicator,mktcap]],temp,left_index=True,right_index=True)
             temp[mktcap] = temp[mktcap].apply(lambda x:np.log(x))
         else:
-            columns = list(quote_factor[industry].drop_duplicates())
+            columns = list(quote_factor[industry].drop_duplicates().dropna())
             temp = pd.merge(quote_factor[['SecuCode','TradingDay',indicator]],temp,left_index=True,right_index=True)
         temp = temp.dropna(subset=[columns],how='any',axis=0)
         temp = temp.dropna(subset=[indicator],how='any',axis=0)
         temp.index = range(len(temp))
         group = temp.groupby(['TradingDay']) #分日期
         #因子去极值并进行标准化
-        z = group.apply(self.section_z_score标准化,indicator)
-        z = z.apply(lambda x:pd.Series(x))
-        z = z.stack()
-        z[z==99] = np.nan
-        temp['%s_zs'%indicator] = z.values
-       
-        #中性化处理
-        temp['%s_nt'%indicator] = group.apply(self.section_regress,'%s_zs'%indicator,columns).values
+        temp['%s_zs'%indicator] = group.apply(lambda x:section_z_score标准化(x,indicator)).values        
+        temp['%s_nt'%indicator] =  temp.groupby(['TradingDay']).apply(self.section_regress,'%s_zs'%indicator,columns).values#中性化处理
+        temp['%s_nt'%indicator] =  temp.groupby(['TradingDay'])['%s_nt'%indicator].apply(lambda x:(x-x.mean())/x.std()).values#再次标准化
         quote_factor = pd.merge(quote_factor,temp[['SecuCode','TradingDay','%s_nt'%indicator]],on=['SecuCode','TradingDay'],how='left')
-        return quote_factor
+        return quote_factor['%s_nt'%indicator]
     
     def section_因子中性化(self,quote_factor,indicator,industry,mktcap=None):
         '''
@@ -106,41 +106,32 @@ class public:
         
         #因子去极值并进行标准化
         temp['%s_zs'%indicator] = temp.apply(self.section_z_score标准化,indicator).values
-        #中性化处理
-        temp['%s_nt'%indicator] = temp.apply(self.section_regress,'%s_zs'%indicator,columns).values
+        temp['%s_nt'%indicator] = temp.apply(self.section_regress,'%s_zs'%indicator,columns).values        #中性化处理
+        temp['%s_nt'%indicator] = (temp['%s_nt'%indicator]-temp['%s_nt'%indicator].mean())/temp['%s_nt'%indicator].std()#再次标准化
         quote_factor = pd.merge(quote_factor,temp[['SecuCode','TradingDay','%s_nt'%indicator]],on=['SecuCode','TradingDay'],how='left')
         return quote_factor
     
     def section_regress(self,data,y,x):
         '''
-        截面回归
+        截面回归,返回残差值
         '''
         y = data[y]
         x = data[x]
         result = sm.OLS(y,x).fit()
         return result.resid 
     
-    def section_秩标准化(self,data,indicator,inudstryname=None):
+    def section_regress2(self,data,yname,xname):
         '''
-        section:代表截面，标准化，
-        inudstryname：非空时，进行行业调整【不是标准化】再标准化
-        data = temp_value
-        indicator = 'pb'
-        对于某些因子，如股息率、PB等，行业之间差距很大，之间进行对比显然是不公平的，
-        那么比较好的方式是对该值进行行业调整，行业调整的思路如下：亿PB为例=个股PB/行业PB中位数 
+        截面回归，返回T值和因子收益值
+        data = quote_factor2[quote_factor2['TradingDay']=='20170428']
+        yname = 'next1'
+        xname = columns
         '''
-        data['value'] = data[indicator].rank(pct=True)
-        data['value'] = (data['value']- data['value'].mean())/ data['value'].std()
-        #行业调整，先进行标准化再打分
-        if inudstryname is not None:
-            median = data.groupby([industryname])[[indicator]].median()
-            median[industryname] = median.index
-            median['median'] = median[indicator]
-            data = pd.merge(data,median[[industryname,'median']],on=industryname,how='left')
-            data['value'] = data[indicator]/abs(data['median']) #行业调整
-            data['value'] = data['value'].rank(pct=True) #全市场标准化
-            data['value'] = (data['value']- data['value'].mean())/ data['value'].std()
-        return data['value'].values
+        y = data[yname]
+        x = data[xname]
+        results = sm.OLS(y,x).fit()
+        value = [ results.tvalues[-1], results.params[-1] ]#获得因子本期收益
+        return value
         
     def section_z_score标准化(self,data,indicator):
         '''
@@ -148,16 +139,107 @@ class public:
         indicator:需要有industyrname名称，返回处理后的data值
         data = temp_value
         indicator = '单季销售毛利率同比'
+        ！！！空值填充为99，便于中性化计算，但在实际中有很多填充方法
         '''
         #中位数取极值法
         median = data[indicator].median()
         new_median = abs(data[indicator] - median).median()
-        #data['value'] = np.clip(data['value'],median-5*newmedian,median+median+5*new_median)
         data['value'] = np.where(data[indicator]>median+5*new_median,median+5*new_median,
                             np.where(data[indicator]<median-5*new_median,median-5*new_median,data[indicator]))
         data['value2'] = (data['value'] -data['value'].mean()) / data['value'].std()      
-        data['value2'] = data['value2'].fillna(99)#为空值是设定为99，以便中性化时需要用到
-        return data['value2'].values
+        return pd.Series(data['value2'])
+    
+    def get_因子回归收益(self,quote_factor,indicator):
+        '''
+        对每一期的因子收益进行回归，从而达到因子收益，行业收益
+        quote_factor:需要有TradingDay、FirstIndustryName
+        industry = '行业一级'
+        indicator = '1个月动量'
+        '''
+        quote_factor = quote_factor.sort_values(['TradingDay'])
+        quote_factor.index = range(len(quote_factor))
+        temp = pd.get_dummies(quote_factor['FirstIndustryName'])
+        quote_factor[temp.columns] = temp
+        columns = list(temp.columns)+ ['mktcap','%s_zs'%indicator]
+        quote_factor2 = quote_factor.dropna(subset=['%s_zs'%indicator,'next1'],axis=0)
+        group = quote_factor2.groupby(['TradingDay'])
+        value = pd.DataFrame(group.apply(self.section_regress2,'next1',columns))
+        value['tvalues'] =  value[0].apply(lambda x:x[0])
+        value['factor_sy'] =  value[0].apply(lambda x:x[1])
+        return value
+    
+    def get_series_rankic(self,data,indicator,decay_count):
+        '''
+        获取时间系列的因子IC、回归收益相关信息
+        data:dataframe,需要有:next1、TradingDay字段
+        data = buylist9.loc[:,:]
+        indicator = '单季营业收入同比_nt'
+        decay_count:计算因子IC的Decay数，默认为6
+        '''
+        value = pd.DataFrame(data.groupby(['TradingDay']).apply(self.section_regress2,'next1',indicator))
+        value['tvalues'] =  value[0].apply(lambda x:x[0])
+        value['factor_sy'] =  value[0].apply(lambda x:x[1])
+        t_mean = pd.Series(data=abs(value['tvalues']).mean(),index=[indicator])
+        t_prob = pd.Series(100*value[abs(value['tvalues'])>=2].count()['tvalues']/value['tvalues'].count(),index=[indicator])
+        mean_sy = pd.Series(value['factor_sy'].mean(),index=[indicator])
+        sy_std =  pd.Series(value['factor_sy'].std(),index=[indicator])
+        sy_t,sy_p_value= stats.ttest_1samp(value['factor_sy'].dropna(), 0)
+        sy_t =  pd.Series(sy_t,index=[indicator])
+        sy_prob = pd.Series(100*value[value['factor_sy']>0].count()['factor_sy']/value['factor_sy'].count(),index=[indicator])
+        
+        corr = data.groupby(['TradingDay'])[['next1',indicator]].corr(method='spearman')#秩相关系数
+        corr['type'] = pd.DataFrame(corr.index)[0].apply(lambda x:x[1]).values
+        corr =  corr[corr['type']=='next1']
+        corr =  corr.drop(['next1','type'],axis=1) 
+        meanic = corr.mean()
+        stdic = corr.std()
+        minic = corr.min()
+        maxic = corr.max()
+        icir = meanic/stdic
+        gl = 100*(corr[corr>0].count()/corr.count())
+        result = pd.concat([t_mean,t_prob,mean_sy,sy_std,sy_t,sy_prob,meanic,stdic,minic,maxic,icir,gl],axis=1)
+        result.columns = ['T值绝对值均值','绝对T值大于2的概率','因子收益均值',\
+                            '因子收益标准差','因子收益T值','因子收益大于0的概率',\
+                            'IC均值','IC标准差','IC最小值','IC最大值','ICIR','IC大于0的概率%']
+        #---------------计算衰退等---------------------------------------------------------
+        next_columns = []
+        for i in range(1,decay_count+1):
+            next_columns = next_columns+['next%s'%i]
+        decay_columns = next_columns + [indicator]
+
+        corr2 = data.groupby(['TradingDay'])[decay_columns].corr(method='spearman')#秩相关系数
+        #corr2['TradingDay'] = pd.DataFrame(corr2.index)[0].apply(lambda x:x[0]).values
+        corr2['decay'] = pd.DataFrame(corr2.index)[0].apply(lambda x:x[1]).values
+        corr2 =  corr2[corr2['decay'].isin(next_columns)]
+        corr2 =  corr2.drop(next_columns,axis=1) 
+        decay = corr2.groupby(['decay']).mean().T
+        corr.columns = ['ICrank']
+        corr['指标'] = indicator
+        corr['TradingDay'] = np.array(pd.DataFrame(corr.index)[0].apply(lambda x:x[0]))
+        result['指标'] = result.index
+        decay['指标'] = decay.index
+        return corr,result,decay,value
+    
+    def get_nextrtn(self,buylist,quote,N=None):
+        '''
+        获取buylist每期选股的下一期收益率
+        buylist,dataframe有TradingDay、SecuCode、因子值等字段
+        quote,dataframe有TradingDay、SecuCode、fq_cp等字段
+        N:获取后N期的收益，默认是下一期
+        '''
+        time0 = buylist[['TradingDay']].drop_duplicates()
+        quote0 = quote[quote['TradingDay'].isin(time0['TradingDay'])]
+        quote0 = quote0.sort_values(['SecuCode','TradingDay'])
+        
+        quote0['rtn'] = np.where(quote0['SecuCode']==quote0['SecuCode'].shift(1),
+                              quote0['fq_cp'] /quote0['fq_cp'].shift(1)-1,np.nan)
+        quote0['next_rtn'] = np.where(quote0['SecuCode']==quote0['SecuCode'].shift(-1),
+                              quote0['rtn'].shift(-1),np.nan)
+        if N is not None:
+            quote0['next_rtn'] = np.where(quote0['SecuCode']==quote0['SecuCode'].shift(-N),
+                              quote0['rtn'].shift(-N),np.nan)
+        buylist0  = pd.merge(buylist0,quote0[['TradingDay','SecuCode','next_rtn']],on=['SecuCode','TradingDay'],how='left')
+        return buylist0['next_rtn'].values
     
     def finance_getinfo_rank(self,data,info,fill=False):
         '''
@@ -272,10 +354,12 @@ class public:
     def get_同比(self,data,indicator):
         '''
         计算财务指标的同比,需要有EndDate、CompanyCode字段
+        data = temp_profit
         '''
         data['lastdate'] = data['EndDate'].apply(lambda x:datetime.datetime(x.year-1,x.month,x.day))
         data['temp'] = data[indicator]
-        data = pd.merge(data,data[['EndDate','CompanyCode','temp']],
+        temp = data[['EndDate','CompanyCode','temp']].drop_duplicates(keep='last')
+        data = pd.merge(data,temp,
                                left_on=['CompanyCode','lastdate'],right_on=['CompanyCode','EndDate'],how='left')        
         data['同比'] = np.where(data['temp_y']!=0,(data[indicator]-data['temp_y'])/abs(data['temp_y']),np.nan)
         return data['同比'].values
@@ -293,7 +377,8 @@ class public:
                                 np.where(data['month']==9,data['EndDate'].apply(lambda x:datetime.datetime(x.year,6,30)),
                                          data['EndDate'].apply(lambda x:datetime.datetime(x.year,9,30)))))
         data['temp'] = data[indicator]
-        data = pd.merge(data,data[['CompanyCode','EndDate','temp']],left_on=['predate','CompanyCode'],
+        temp = data[['EndDate','CompanyCode','temp']].drop_duplicates(keep='last')
+        data = pd.merge(data,temp,left_on=['predate','CompanyCode'],
                                 right_on = ['EndDate','CompanyCode'],how='left')
         data['环比'] = np.where(data['temp_y']!=0,(data[indicator]-data['temp_y'])/abs(data['temp_y']),np.nan)
         return data['环比'].values
@@ -307,31 +392,72 @@ class public:
         '''
         data['lastdate'] = data['EndDate'].apply(lambda x:datetime.datetime(x.year-N,x.month,x.day))
         data['temp'] = data[indicator]
-        data = pd.merge(data,data[['EndDate','CompanyCode','temp']],
+        temp = data[['EndDate','CompanyCode','temp']].drop_duplicates(keep='last')
+        data = pd.merge(data,temp,
                                left_on=['CompanyCode','lastdate'],right_on=['CompanyCode','EndDate'],how='left')        
         data['增长率'] = np.where(data['temp_y']!=0,(data[indicator]/abs(data['temp_y']))**(1/N)-1,np.nan)
         return data['增长率'].values 
+    
+    def get_group同比(self,data,indicator):
+        '''
+        计算时间系列的同比，可能同个ENDDATE，不同TradingDay有一些重复数据
+        data =  last_data 
+        indicator = 'eps'
+        '''
+        data['lastdate'] = data['EndDate'].apply(lambda x:datetime.datetime(x.year-1,x.month,x.day))
+        data['temp'] = data[indicator]
+        temp = data[['EndDate','SecuCode','temp','TradingDay']].drop_duplicates(keep='last')
+        data = pd.merge(data,temp,
+                               left_on=['SecuCode','lastdate'],right_on=['SecuCode','EndDate'],how='outer')        
+        
+        data['同比'] = np.where(data['temp_y']!=0,(data[indicator]-data['temp_y'])/abs(data['temp_y']),np.nan)
+        data = data.drop_duplicates(subset=['SecuCode','TradingDay_x',indicator])
+        data = data.dropna(subset=['TradingDay_x'],axis=0)
+        return data['同比'].values
+    
+    def get_group环比(self,data,indicator):
+        '''
+        计算时间系列的环比，可能同个ENDDATE，不同TradingDay有一些重复数据
+        '''
+        data['month'] = data['EndDate'].apply(lambda x:x.month)
+        data['predate'] = np.where(data['month']==3,data['EndDate'].apply(lambda x:datetime.datetime(x.year-1,12,31)),
+                            np.where(data['month']==6,data['EndDate'].apply(lambda x:datetime.datetime(x.year,3,31)),
+                                np.where(data['month']==9,data['EndDate'].apply(lambda x:datetime.datetime(x.year,6,30)),
+                                         data['EndDate'].apply(lambda x:datetime.datetime(x.year,9,30)))))
+        data['temp'] = data[indicator]
+        temp = data[['EndDate','SecuCode','temp','TradingDay']].drop_duplicates(keep='last')
+        data = pd.merge(data,temp,left_on=['predate','SecuCode'],
+                                right_on = ['EndDate','SecuCode'],how='outer')
+        data['环比'] = np.where(data['temp_y']!=0,(data[indicator]-data['temp_y'])/abs(data['temp_y']),np.nan)
+        data = data.drop_duplicates(subset=['SecuCode','TradingDay_x',indicator])
+        data = data.dropna(subset=['TradingDay_x'],axis=0)
+        return data['环比'].values
     
     def get_ttm(self,data,indicator):
         '''
         财务数据，当期数据计算该指标的TTM值
         需要有CompanyCode，EndDate，InfoPublDate字段
         需要：已经排序并且删除了重复数据
-        data = data.sort_values(['CompanyCode','EndDate','InfoPublDate'])
+        data = temp_OperatingRevenue
         data = data.drop_duplicates(['CompanyCode','EndDate'],keep='last')
-        indicator:需要计算的指标，如‘归属母公司的净利润’
+        indicator='OperatingRevenue':需要计算的指标，如‘归属母公司的净利润’
         data = temp_profit
-        indicator = 'TotalOperatingRevenue'
+        indicator = '扣非归母净利润'
         ''' 
         data['month'] = data['EndDate'].apply(lambda x:x.month)  
         data['lastdate'] = data['EndDate'].apply(lambda x:datetime.datetime(x.year-1,x.month,x.day))
         data['yeardate'] = data['EndDate'].apply(lambda x:datetime.datetime(x.year-1,12,31))
         data['temp'] = data[indicator]
-        data = pd.merge(data,data[['EndDate','CompanyCode','temp']],
-                               left_on=['CompanyCode','yeardate'],right_on=['CompanyCode','EndDate'],how='left')        
-        data = pd.merge(data,data[['EndDate_x','CompanyCode','temp_x']],
-                               left_on=['CompanyCode','lastdate'],right_on=['CompanyCode','EndDate_x'],how='left')  
-        data['TTM'] = np.where(data['month']!=12,data[indicator]+data['temp_y']-data['temp_x_y'],data[indicator])
+        year_data = data[['EndDate','CompanyCode','temp']].drop_duplicates(keep='last')
+        data = pd.merge(data,year_data,
+                          left_on=['CompanyCode','yeardate'],right_on=['CompanyCode','EndDate'],how='left')        
+        data = pd.merge(data,year_data,
+                         left_on=['CompanyCode','lastdate'],right_on=['CompanyCode','EndDate'],how='left')  
+        if len(data)>0:
+            data['TTM'] = np.where(data['month']!=12,data[indicator]+data['temp_y']-data['temp'],data[indicator])
+        else:
+            data['TTM'] = data[indicator]
+         
         return data['TTM'].values
     
     def get_单季值(self,data,indicator):
@@ -350,11 +476,11 @@ class public:
                                          data['EndDate'].apply(lambda x:datetime.datetime(x.year,9,30)))))
         
         data['temp'] = data[indicator]
-        data = pd.merge(data,data[['CompanyCode','EndDate','temp']],left_on=['predate','CompanyCode'],
+        temp = data[['EndDate','CompanyCode','temp']].drop_duplicates(keep='last')
+        data = pd.merge(data,temp,left_on=['predate','CompanyCode'],
                                 right_on = ['EndDate','CompanyCode'],how='left')
         data['单季值'] = np.where(data['month']==3,data[indicator],data[indicator]-data['temp_y'])
         return data['单季值'].values
-
         
     
     def get_industry(self,standard):
@@ -593,24 +719,6 @@ class public:
         return data
         
     
-    def get_nextrtn(self,buylist,quote):
-        '''
-        获取buylist每期选股的下一期收益率
-        buylist,dataframe有TradingDay、SecuCode、因子值等字段
-        quote,dataframe有TradingDay、SecuCode、fq_cp等字段
-        '''
-        time0 = buylist[['TradingDay']].drop_duplicates()
-        quote0 = quote[quote['TradingDay'].isin(time0['TradingDay'])]
-        quote0 = quote0.sort_values(['SecuCode','TradingDay'])
-        
-        quote0['rtn'] = np.where(quote0['SecuCode']==quote0['SecuCode'].shift(1),
-                              quote0['fq_cp'] /quote0['fq_cp'].shift(1)-1,np.nan)
-        quote0['next_rtn'] = np.where(quote0['SecuCode']==quote0['SecuCode'].shift(-1),
-                              quote0['rtn'].shift(-1),np.nan)
-        buylist0 = buylist.sort_values(['TradingDay','SecuCode'])
-        buylist0  = pd.merge(buylist0,quote0[['TradingDay','SecuCode','next_rtn']],on=['SecuCode','TradingDay'],how='left')
-        return buylist0
-    
     def get_事件驱动统计(self,data,quote,index_quote=None):
         '''
         事件发生日，后续的行情统计
@@ -632,103 +740,74 @@ class public:
                       quote4['fq_cp'].shift(-i)/quote4['fq_cp']-quote4['index_cp'].shift(-i)/quote4['index_cp'],np.nan)
         
         print("事件驱动统计完毕...")
-          
-    def get_rankic(self,quote_factor,indicator,ifnuetral=False):
-        '''
-        顺带获取因子回归收益
-        indicator = 'pettm'
-        获取每一期的相关系数，rankic值,ICdecay值
-        industry:非空时，则计算该指标的行业调整后的IC等值
-        industry_name ='行业一级'
-        indicator = 'A股流通市值'
-        '''
-        value = self.get_因子回归收益(quote_factor,indicator)#因子回归的收益系列
-        t_mean = pd.Series(data=abs(value['tvalues']).mean(),index=['%s_nt'%indicator])
-        t_prob = pd.Series(100*value[abs(value['tvalues'])>=2].count()['tvalues']/value['tvalues'].count(),index=['%s_nt'%indicator])
-        mean_sy = pd.Series(value['factor_sy'].mean(),index=['%s_nt'%indicator])
-        sy_std =  pd.Series(value['factor_sy'].std(),index=['%s_nt'%indicator])
-        sy_t,sy_p_value= stats.ttest_1samp(value['factor_sy'], 0)
-        sy_t =  pd.Series(sy_t,index=['%s_nt'%indicator])
-        sy_prob = pd.Series(100*value[value['factor_sy']>0].count()['factor_sy']/value['factor_sy'].count(),index=['%s_nt'%indicator])
-           
-        
-        #quote3 = quote[['SecuCode','TradingDay','next1',indicator]]
-        columns_names = ['ICRank']
-        quote3 =  quote_factor[['SecuCode','TradingDay','next1','next2','next3','next4','next5','next6',indicator]]
-        if ifnuetral==True:
-            quote3 =  quote_factor[['SecuCode','TradingDay','next1','next2','next3','next4','next5','next6',indicator,'%s_nt'%indicator]]
-            columns_names = ['ICRank','ICRank_netural']
-            indicator =  '%s_zs'%indicator
-                
-        #获取IC、ir标准差等值
-        group = quote3.drop(['next2','next3','next4','next5','next6'],axis=1).groupby(['TradingDay'])
-        corr = group.corr(method='spearman')#秩相关系数
-        corr['type'] = pd.DataFrame(corr.index)[0].apply(lambda x:x[1]).values
-        corr =  corr[corr['type']=='next1']
-        corr =  corr.drop(['next1','type'],axis=1) 
-        meanic = corr.mean()
-        stdic = corr.std()
-        minic = corr.min()
-        maxic = corr.max()
-        icir = meanic/stdic
-        gl = 100*(corr[corr>0].count()/corr.count())
-        result = pd.concat([t_mean,t_prob,mean_sy,sy_std,sy_t,sy_prob,meanic,stdic,minic,maxic,icir,gl],axis=1)
-        result.columns = ['T值绝对值均值','绝对T值大于2的概率','因子收益均值','因子收益标准差','因子收益T值','因子收益大于0的概率',
-                          'IC均值','IC标准差','IC最小值','IC最大值','ICIR','IC大于0的概率%'] 
-        #获取因子decay
-        group2 = quote3.groupby(['TradingDay'])
-        corr2 = group2.corr(method='spearman')#秩相关系数
-        #corr2['TradingDay'] = pd.DataFrame(corr2.index)[0].apply(lambda x:x[0]).values
-        corr2['decay'] = pd.DataFrame(corr2.index)[0].apply(lambda x:x[1]).values
-        corr2 =  corr2[corr2['decay'].isin(['next1','next2','next3','next4','next5','next6'])]
-        corr2 =  corr2.drop(['next1','next2','next3','next4','next5','next6'],axis=1) 
-        decay = corr2.groupby(['decay']).mean().T
-        corr.columns = columns_names
-        corr['指标'] = indicator
-        corr['TradingDay'] = np.array(pd.DataFrame(corr.index)[0].apply(lambda x:x[0]))
-        #corr['TradingDay'] = corr['TradingDay'].apply(lambda x:datetime.datetime.strftime(x,"%Y%m%d"))
-        result['指标'] = result.index
-        decay['指标'] = decay.index
-        return corr,result,decay,value
     
-    def get_因子回归收益(self,quote_factor,indicator):
+    def get_日期表(self,startdate=None,enddate=None):
         '''
-        对每一期的因子收益进行回归，从而达到因子收益，行业收益，及
-        industry = '行业一级'
-        indicator = '1个月动量'
+        获取交易日和自然日对应的日期表，自然日字段：TradingDate，交易日字段：dt
         '''
-        quote_factor = quote_factor.sort_values(['TradingDay'])
-        quote_factor.index = range(len(quote_factor))
-        temp = pd.get_dummies(quote_factor['FirstIndustryName'])
-        quote_factor[temp.columns] = temp
-        columns = list(temp.columns)+ ['mktcap','%s_zs'%indicator]
-        quote_factor2 = quote_factor.dropna(subset=['%s_zs'%indicator,'next1'],axis=0)
-        group = quote_factor2.groupby(['TradingDay'])
-        value = pd.DataFrame(group.apply(self.section_regress2,'next1',columns))
-        value['tvalues'] =  value[0].apply(lambda x:x[0])
-        value['factor_sy'] =  value[0].apply(lambda x:x[1])
-        return value
+        if startdate == None:
+            startdate = '19901219'
+        if enddate == None:
+            enddate = '20990101'
+        sql = "select * from QT_TradingDayNew where SecuMarket=83  and \
+               TradingDate>="+startdate+" and TradingDate<="+enddate+" order by TradingDate"
+        date = pd.read_sql(sql,con=self._dbengine)  
+        date_jy = date[date['IfTradingDay']==1]
+        date_jy['TradingDay'] = date_jy['TradingDate']
+        date2 = pd.merge(date,date_jy[['TradingDate','TradingDay']],on='TradingDate',how='left')
+        date2['TradingDay'] = date2['TradingDay'].fillna(method='ffill')  
+        date2 =  date2[['TradingDate','TradingDay']]
+        return date2
     
-    def ic_rank(self,buylist0,factor):
+    def quote_insert_不定期数据(self,quote,data,dt,joinname,indicators):
         '''
-        计算IC即ICrank值
-        buylist0 dataframe 有有TradingDay、next_rtn、因子值数据
-        buylist0 = buylist9
-        factor = '1个月动量'
+        quote:行情数据
+        data:其他数据，有SecuCode\InfoPublDate或者EndDate等字段
+        dt：日期表，TradingDate：自然日，TradingDay：交易日
+        joinname='dt':默认TradingDay,可能是EndDate,也可能是InfoPublDate字段
+        indicators=['AFloats']:list，名称字段
         '''
-        #factor = '总市值'
-        corr = pd.DataFrame()
-        time0 = buylist0[['TradingDay']].drop_duplicates()
-        for i in range(len(time0)):
-            date = time0.iloc[i]['TradingDay']
-            data = buylist0[buylist0['TradingDay']==date]
-            data = data.dropna(subset=[factor],how='any',axis=0)
-            rank_ic = data[[factor,'next_rtn']].rank().corr().ix[0][1]
-            init_ic = data[[factor,'next_rtn']].corr().ix[0][1]
-            corr = corr.append(pd.DataFrame([[date,init_ic,rank_ic]]))
-        corr1 = pd.DataFrame([[date,corr.mean()[1],corr.mean()[2]]]).append(corr)   
-        corr2 = pd.DataFrame([[date,corr.mean()[1]/corr.std()[1],corr.mean()[2]/corr.std()[2]]]).append(corr1)   
-        return corr2
+#        if indicators == None:
+#            indicators2 = data.columns
+#        else:
+#        data = data.drop_duplicates(subset=['CompanyCode',joinname])
+        indicators2 = ['CompanyCode','TradingDay'] + indicators
+        temp_columns = ['CompanyCode','TradingDay']+indicators
+        data = pd.merge(data,dt,left_on=joinname,right_on='TradingDate',how='left')
+        #解决初始行情数值缺失问题
+        temp = quote.groupby(['CompanyCode'])[['TradingDay']].min()#行情的初始值
+        temp['CompanyCode'] = temp.index
+        temp = pd.merge(temp,data,on=['CompanyCode'])
+        temp = temp[temp['TradingDay_x']>=temp['TradingDay_y']]
+        temp = temp.drop_duplicates(subset=['CompanyCode','TradingDay_x'],keep='last')
+        temp = temp.rename(columns={"TradingDay_x":"TradingDay"})
+        temp2 = data[indicators2].append(temp[indicators2])#叠加到原始列中，这样解决了初始数据缺失问题
+        temp2 = temp2.drop_duplicates()
+        quote = pd.merge(quote,temp2,on=['CompanyCode','TradingDay'],how='left')
+        quote = quote.drop_duplicates(subset=['CompanyCode','TradingDay'],keep='last')
+        quote[indicators]  = quote.groupby(['CompanyCode'])[indicators].fillna(method='ffill')#填充
+        return quote
+    
+#    def ic_rank(self,buylist0,factor):
+#        '''
+#        计算IC即ICrank值
+#        buylist0 dataframe 有有TradingDay、next_rtn、因子值数据
+#        buylist0 = buylist9
+#        factor = '1个月动量'
+#        '''
+#        #factor = '总市值'
+#        corr = pd.DataFrame()
+#        time0 = buylist0[['TradingDay']].drop_duplicates()
+#        for i in range(len(time0)):
+#            date = time0.iloc[i]['TradingDay']
+#            data = buylist0[buylist0['TradingDay']==date]
+#            data = data.dropna(subset=[factor],how='any',axis=0)
+#            rank_ic = data[[factor,'next_rtn']].rank().corr().ix[0][1]
+#            init_ic = data[[factor,'next_rtn']].corr().ix[0][1]
+#            corr = corr.append(pd.DataFrame([[date,init_ic,rank_ic]]))
+#        corr1 = pd.DataFrame([[date,corr.mean()[1],corr.mean()[2]]]).append(corr)   
+#        corr2 = pd.DataFrame([[date,corr.mean()[1]/corr.std()[1],corr.mean()[2]/corr.std()[2]]]).append(corr1)   
+#        return corr2
     
     def get_缓冲买入股票(self,data,number):
         '''
