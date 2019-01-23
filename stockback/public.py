@@ -51,14 +51,14 @@ class public:
         1. 因子中位数去极值；
         2. 因子标准
         3. 以对数总市值+行业虚拟变量为X值，以因子值为Y值，进行中性化回归处理，去残差作为新的因子值
-        quote_factor = quote2[(quote2['TradingDay']>='20110101')&(quote2['TradingDay']<='20110301')]
-        industry = 'FirstIndustryName'
+        quote_factor = buylist9.loc[:,:]
+        industry = '预期每股现金流FY2'
         mktcap = '流通市值',若不为空，则进行市值中心化
         zs:z_core,代表标准化
         indicator = '流通市值'
         nt:nuetralize,代表进行行业、市值中性化处理
         '''
-        quote_factor = quote_factor.sort_values(['TradingDay'])
+#        quote_factor = quote_factor.sort_values(['TradingDay'])
         quote_factor.index = range(len(quote_factor))
         temp = pd.get_dummies(quote_factor[industry])
         if  mktcap is not None:
@@ -73,7 +73,7 @@ class public:
         temp.index = range(len(temp))
         group = temp.groupby(['TradingDay']) #分日期
         #因子去极值并进行标准化
-        temp['%s_zs'%indicator] = group.apply(lambda x:section_z_score标准化(x,indicator)).values        
+        temp['%s_zs'%indicator] = group.apply(lambda x:self.section_z_score标准化(x,indicator)).values        
         temp['%s_nt'%indicator] =  temp.groupby(['TradingDay']).apply(self.section_regress,'%s_zs'%indicator,columns).values#中性化处理
         temp['%s_nt'%indicator] =  temp.groupby(['TradingDay'])['%s_nt'%indicator].apply(lambda x:(x-x.mean())/x.std()).values#再次标准化
         quote_factor = pd.merge(quote_factor,temp[['SecuCode','TradingDay','%s_nt'%indicator]],on=['SecuCode','TradingDay'],how='left')
@@ -115,7 +115,7 @@ class public:
         '''
         截面回归,返回残差值
         '''
-        y = data[y]
+        y = data[y].astype(float)
         x = data[x]
         result = sm.OLS(y,x).fit()
         return result.resid 
@@ -176,6 +176,7 @@ class public:
         indicator = '单季营业收入同比_nt'
         decay_count:计算因子IC的Decay数，默认为6
         '''
+        data = data.dropna(subset=['next1'],axis=0)
         value = pd.DataFrame(data.groupby(['TradingDay']).apply(self.section_regress2,'next1',indicator))
         value['tvalues'] =  value[0].apply(lambda x:x[0])
         value['factor_sy'] =  value[0].apply(lambda x:x[1])
